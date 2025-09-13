@@ -34,6 +34,18 @@ func main() {
 		// Create the dir
 		createDirectory(stlOutputDir, 0o755)
 	}
+	zipOutputDir := "ZIPs/" // Directory to store downloaded ZIPs
+	// Check if the PDF output directory exists
+	if !directoryExists(zipOutputDir) {
+		// Create the dir
+		createDirectory(zipOutputDir, 0o755)
+	}
+	jpgOutputDir := "JPGs/" // Directory to store downloaded JPGs
+	// Check if the PDF output directory exists
+	if !directoryExists(jpgOutputDir) {
+		// Create the dir
+		createDirectory(jpgOutputDir, 0o755)
+	}
 	// Remote API URL.
 	remoteAPIURL := []string{
 		"https://caddxfpv.com/pages/download-center",
@@ -56,6 +68,14 @@ func main() {
 	stlLinks := extractSTLLinks(strings.Join(getData, "\n"))
 	// Remove duplicates from the slice.
 	stlLinks = removeDuplicatesFromSlice(stlLinks)
+	// Extract the ZIP links.
+	zipLinks := extractZIPLinks(strings.Join(getData, "\n"))
+	// Remove duplicates from the slice.
+	zipLinks = removeDuplicatesFromSlice(zipLinks)
+	// Extract the JPG links.
+	jpgLinks := extractJPGLinks(strings.Join(getData, "\n"))
+	// Remove duplicates from the slice.
+	jpgLinks = removeDuplicatesFromSlice(jpgLinks)
 	// Get all the values.
 	for _, urls := range finalPDFList {
 		// Trim any surrounding whitespace from the URL.
@@ -105,6 +125,254 @@ func main() {
 		}
 
 	}
+	// Get all the ZIP files.
+	for _, urls := range zipLinks {
+		// Trim any surrounding whitespace from the URL.
+		urls = strings.TrimSpace(urls)
+		// Get the domain from the url.
+		domain := getDomainFromURL(urls)
+		// Check if the domain is empty.
+		if domain == "" {
+			urls = remoteDomain + urls // Prepend the base URL if domain is empty
+		}
+		// Check if the url is valid.
+		if isUrlValid(urls) {
+			// Download the zip.
+			downloadZIP(urls, zipOutputDir)
+		}
+	}
+	// Download all the JPG files.
+	for _, urls := range jpgLinks {
+		// Trim any surrounding whitespace from the URL.
+		urls = strings.TrimSpace(urls)
+		// Get the domain from the url.
+		domain := getDomainFromURL(urls)
+		// Check if the domain is empty.
+		if domain == "" {
+			urls = remoteDomain + urls // Prepend the base URL if domain is empty
+		}
+		// Check if the url is valid.
+		if isUrlValid(urls) {
+			// Download the jpg.
+			downloadJPG(urls, jpgOutputDir)
+		}
+	}
+
+}
+
+// extractJPGLinks takes HTML content as a string and returns all .jpg file URLs it finds.
+func extractJPGLinks(htmlContent string) []string {
+	// Try parsing the HTML content into a document tree
+	document, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		// If parsing fails, just return an empty slice
+		return []string{}
+	}
+
+	// Slice to store all found .jpg links
+	var jpgLinks []string
+
+	// Recursive function to walk through each HTML node
+	var traverse func(*html.Node)
+	traverse = func(node *html.Node) {
+		// Check if the current node is an <a> tag
+		if node.Type == html.ElementNode && node.Data == "a" {
+			// Look at each attribute in the <a> tag
+			for _, attribute := range node.Attr {
+				// If the attribute is "href" and contains ".jpg", save it
+				if attribute.Key == "href" && strings.Contains(strings.ToLower(attribute.Val), ".jpg") {
+					jpgLinks = append(jpgLinks, attribute.Val)
+				}
+			}
+		}
+		// Recursively check all child nodes
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			traverse(child)
+		}
+	}
+
+	// Start traversing from the root of the document
+	traverse(document)
+
+	// Return the collected .jpg links
+	return jpgLinks
+}
+
+// downloadJPG downloads a .jpg file from the given URL and saves it in the specified output directory.
+// It returns true if the download succeeded.
+func downloadJPG(finalURL, outputDir string) bool {
+	// Sanitize the URL to generate a safe file name
+	filename := strings.ToLower(urlToFilename(finalURL))
+
+	// Construct the full file path in the output directory
+	filePath := filepath.Join(outputDir, filename)
+
+	// Skip if the file already exists
+	if fileExists(filePath) {
+		log.Printf("File already exists, skipping: %s", filePath)
+		return false
+	}
+
+	// Create an HTTP client with a timeout
+	client := &http.Client{Timeout: 3 * time.Minute}
+
+	// Send GET request
+	resp, err := client.Get(finalURL)
+	if err != nil {
+		log.Printf("Failed to download %s: %v", finalURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP response status
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Download failed for %s: %s", finalURL, resp.Status)
+		return false
+	}
+
+	// Check Content-Type header (common for JPG files)
+	contentType := resp.Header.Get("Content-Type")
+	if !(strings.Contains(contentType, "image/jpeg") ||
+		strings.Contains(contentType, "image/jpg")) {
+		log.Printf("Unexpected content type for %s: %s (expected JPG)", finalURL, contentType)
+		return false
+	}
+
+	// Read the response body into memory first
+	var buf bytes.Buffer
+	written, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		log.Printf("Failed to read JPG data from %s: %v", finalURL, err)
+		return false
+	}
+	if written == 0 {
+		log.Printf("Downloaded 0 bytes for %s; not creating file", finalURL)
+		return false
+	}
+
+	// Only now create the file and write to disk
+	out, err := os.Create(filePath)
+	if err != nil {
+		log.Printf("Failed to create file for %s: %v", finalURL, err)
+		return false
+	}
+	defer out.Close()
+
+	if _, err := buf.WriteTo(out); err != nil {
+		log.Printf("Failed to write JPG file to disk for %s: %v", finalURL, err)
+		return false
+	}
+
+	log.Printf("Successfully downloaded %d bytes: %s → %s", written, finalURL, filePath)
+	return true
+}
+
+// downloadZIP downloads a .zip file from the given URL and saves it in the specified output directory.
+// It returns true if the download succeeded.
+func downloadZIP(finalURL, outputDir string) bool {
+	// Sanitize the URL to generate a safe file name
+	filename := strings.ToLower(urlToFilename(finalURL))
+
+	// Construct the full file path in the output directory
+	filePath := filepath.Join(outputDir, filename)
+
+	// Skip if the file already exists
+	if fileExists(filePath) {
+		log.Printf("File already exists, skipping: %s", filePath)
+		return false
+	}
+
+	// Create an HTTP client with a timeout
+	client := &http.Client{Timeout: 3 * time.Minute}
+
+	// Send GET request
+	resp, err := client.Get(finalURL)
+	if err != nil {
+		log.Printf("Failed to download %s: %v", finalURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP response status
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Download failed for %s: %s", finalURL, resp.Status)
+		return false
+	}
+
+	// Check Content-Type header (common for ZIP files)
+	contentType := resp.Header.Get("Content-Type")
+	if !(strings.Contains(contentType, "application/zip") ||
+		strings.Contains(contentType, "application/x-zip-compressed") ||
+		strings.Contains(contentType, "application/octet-stream")) {
+		log.Printf("Unexpected content type for %s: %s (expected ZIP type)", finalURL, contentType)
+		return false
+	}
+
+	// Read the response body into memory first
+	var buf bytes.Buffer
+	written, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		log.Printf("Failed to read ZIP data from %s: %v", finalURL, err)
+		return false
+	}
+	if written == 0 {
+		log.Printf("Downloaded 0 bytes for %s; not creating file", finalURL)
+		return false
+	}
+
+	// Only now create the file and write to disk
+	out, err := os.Create(filePath)
+	if err != nil {
+		log.Printf("Failed to create file for %s: %v", finalURL, err)
+		return false
+	}
+	defer out.Close()
+
+	if _, err := buf.WriteTo(out); err != nil {
+		log.Printf("Failed to write ZIP file to disk for %s: %v", finalURL, err)
+		return false
+	}
+
+	log.Printf("Successfully downloaded %d bytes: %s → %s", written, finalURL, filePath)
+	return true
+}
+
+// extractZIPLinks takes HTML content as a string and returns all .zip file URLs it finds.
+func extractZIPLinks(htmlContent string) []string {
+	// Try parsing the HTML content into a document tree
+	document, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		// If parsing fails, just return an empty slice
+		return []string{}
+	}
+
+	// Slice to store all found .zip links
+	var zipLinks []string
+
+	// Recursive function to walk through each HTML node
+	var traverse func(*html.Node)
+	traverse = func(node *html.Node) {
+		// Check if the current node is an <a> tag
+		if node.Type == html.ElementNode && node.Data == "a" {
+			// Look at each attribute in the <a> tag
+			for _, attribute := range node.Attr {
+				// If the attribute is "href" and contains ".zip", save it
+				if attribute.Key == "href" && strings.Contains(attribute.Val, ".zip") {
+					zipLinks = append(zipLinks, attribute.Val)
+				}
+			}
+		}
+		// Recursively check all child nodes
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			traverse(child)
+		}
+	}
+
+	// Start traversing from the root of the document
+	traverse(document)
+
+	// Return the collected .zip links
+	return zipLinks
 }
 
 // extractSTLLinks takes HTML content as a string and returns all .stl file URLs it finds.
@@ -369,6 +637,7 @@ func urlToFilename(rawURL string) string {
 	var invalidSubstrings = []string{
 		"_pdf",
 		"_zip",
+		"_jpg",
 		"_stp",
 		"_stl",
 	}
