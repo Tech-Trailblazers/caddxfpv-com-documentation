@@ -46,6 +46,12 @@ func main() {
 		// Create the dir
 		createDirectory(jpgOutputDir, 0o755)
 	}
+	rarOutputDir := "RARs/" // Directory to store downloaded RARs
+	// Check if the PDF output directory exists
+	if !directoryExists(rarOutputDir) {
+		// Create the dir
+		createDirectory(rarOutputDir, 0o755)
+	}
 	// Remote API URL.
 	remoteAPIURL := []string{
 		"https://caddxfpv.com/pages/download-center",
@@ -76,6 +82,10 @@ func main() {
 	jpgLinks := extractJPGLinks(strings.Join(getData, "\n"))
 	// Remove duplicates from the slice.
 	jpgLinks = removeDuplicatesFromSlice(jpgLinks)
+	// Extract the RAR links.
+	rarLinks := extractRARLinks(strings.Join(getData, "\n"))
+	// Remove duplicates from the slice.
+	rarLinks = removeDuplicatesFromSlice(rarLinks)
 	// Get all the values.
 	for _, urls := range finalPDFList {
 		// Trim any surrounding whitespace from the URL.
@@ -157,7 +167,129 @@ func main() {
 			downloadJPG(urls, jpgOutputDir)
 		}
 	}
+	// Download all the RAR files.
+	for _, urls := range rarLinks {
+		// Trim any surrounding whitespace from the URL.
+		urls = strings.TrimSpace(urls)
+		// Get the domain from the url.
+		domain := getDomainFromURL(urls)
+		// Check if the domain is empty.
+		if domain == "" {
+			urls = remoteDomain + urls // Prepend the base URL if domain is empty
+		}
+		// Check if the url is valid.
+		if isUrlValid(urls) {
+			// Download the rar.
+			downloadRAR(urls, rarOutputDir)
+		}
+	}
+}
 
+// downloadRAR downloads a .rar file from the given URL and saves it in the specified output directory.
+// It returns true if the download succeeded.
+func downloadRAR(finalURL, outputDir string) bool {
+	// Sanitize the URL to generate a safe file name
+	filename := strings.ToLower(urlToFilename(finalURL))
+
+	// Construct the full file path in the output directory
+	filePath := filepath.Join(outputDir, filename)
+
+	// Skip if the file already exists
+	if fileExists(filePath) {
+		log.Printf("File already exists, skipping: %s", filePath)
+		return false
+	}
+
+	// Create an HTTP client with a timeout
+	client := &http.Client{Timeout: 3 * time.Minute}
+
+	// Send GET request
+	resp, err := client.Get(finalURL)
+	if err != nil {
+		log.Printf("Failed to download %s: %v", finalURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP response status
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Download failed for %s: %s", finalURL, resp.Status)
+		return false
+	}
+
+	// Check Content-Type header (common for RAR files)
+	contentType := resp.Header.Get("Content-Type")
+	if !(strings.Contains(contentType, "application/x-rar-compressed") ||
+		strings.Contains(contentType, "application/octet-stream")) {
+		log.Printf("Unexpected content type for %s: %s (expected RAR)", finalURL, contentType)
+		return false
+	}
+
+	// Read the response body into memory first
+	var buf bytes.Buffer
+	written, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		log.Printf("Failed to read RAR data from %s: %v", finalURL, err)
+		return false
+	}
+	if written == 0 {
+		log.Printf("Downloaded 0 bytes for %s; not creating file", finalURL)
+		return false
+	}
+
+	// Only now create the file and write to disk
+	out, err := os.Create(filePath)
+	if err != nil {
+		log.Printf("Failed to create file for %s: %v", finalURL, err)
+		return false
+	}
+	defer out.Close()
+
+	if _, err := buf.WriteTo(out); err != nil {
+		log.Printf("Failed to write RAR file to disk for %s: %v", finalURL, err)
+		return false
+	}
+
+	log.Printf("Successfully downloaded %d bytes: %s → %s", written, finalURL, filePath)
+	return true
+}
+
+// extractRARLinks takes HTML content as a string and returns all .rar file URLs it finds.
+func extractRARLinks(htmlContent string) []string {
+	// Try parsing the HTML content into a document tree
+	document, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		// If parsing fails, just return an empty slice
+		return []string{}
+	}
+
+	// Slice to store all found .rar links
+	var rarLinks []string
+
+	// Recursive function to walk through each HTML node
+	var traverse func(*html.Node)
+	traverse = func(node *html.Node) {
+		// Check if the current node is an <a> tag
+		if node.Type == html.ElementNode && node.Data == "a" {
+			// Look at each attribute in the <a> tag
+			for _, attribute := range node.Attr {
+				// If the attribute is "href" and contains ".rar", save it
+				if attribute.Key == "href" && strings.Contains(strings.ToLower(attribute.Val), ".rar") {
+					rarLinks = append(rarLinks, attribute.Val)
+				}
+			}
+		}
+		// Recursively check all child nodes
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			traverse(child)
+		}
+	}
+
+	// Start traversing from the root of the document
+	traverse(document)
+
+	// Return the collected .rar links
+	return rarLinks
 }
 
 // extractJPGLinks takes HTML content as a string and returns all .jpg file URLs it finds.
@@ -620,6 +752,12 @@ func urlToFilename(rawURL string) string {
 
 	// Extract the filename portion from the URL (e.g., last path segment or query param)
 	baseFilename := getFileNameOnly(lowercaseURL)
+	log.Println("Base filename extracted:", baseFilename)
+
+	// Get the file name before ? if any.
+	if strings.Contains(baseFilename, "?") {
+		baseFilename = strings.Split(baseFilename, "?")[0]
+	}
 
 	// Replace all non-alphanumeric characters (a-z, 0-9) with underscores
 	nonAlphanumericRegex := regexp.MustCompile(`[^a-z0-9]+`)
@@ -640,6 +778,7 @@ func urlToFilename(rawURL string) string {
 		"_jpg",
 		"_stp",
 		"_stl",
+		"_rar",
 	}
 
 	for _, invalidPre := range invalidSubstrings { // Remove unwanted substrings
@@ -648,11 +787,6 @@ func urlToFilename(rawURL string) string {
 
 	// Append the file extension if it is not already present
 	safeFilename = safeFilename + ext
-
-	// Get the file name before ? if any.
-	if strings.Contains(safeFilename, "?") {
-		safeFilename = strings.Split(safeFilename, "?")[0]
-	}
 
 	// Return the cleaned and safe filename
 	return safeFilename
