@@ -1,7 +1,7 @@
 package main // Define the main package
 
 import (
-	"bytes" // Provides bytes support
+	"bytes"         // Provides bytes support
 	"io"            // Provides basic interfaces to I/O primitives
 	"log"           // Provides logging functions
 	"net/http"      // Provides HTTP client and server implementations
@@ -59,6 +59,12 @@ func main() {
 		// Create the dir
 		createDirectory(pngOutputDir, 0o755)
 	}
+	stepOutputDir := "STEPs/" // Directory to store downloaded STEPs
+	// Check if the STEP output directory exists
+	if !directoryExists(stepOutputDir) {
+		// Create the dir
+		createDirectory(stepOutputDir, 0o755)
+	}
 	// Remote API URL.
 	remoteAPIURL := []string{
 		"https://caddxfpv.com/pages/download-center",
@@ -97,6 +103,10 @@ func main() {
 	pngLinks := extractPNGLinks(strings.Join(getData, "\n"))
 	// Remove duplicates from the slice.
 	pngLinks = removeDuplicatesFromSlice(pngLinks)
+	// Extract the STEP links.
+	stepLinks := extractSTEPLinks(strings.Join(getData, "\n"))
+	// Remove duplicates from the slice.
+	stepLinks = removeDuplicatesFromSlice(stepLinks)
 	// Get all the values.
 	for _, urls := range finalPDFList {
 		// Trim any surrounding whitespace from the URL.
@@ -210,6 +220,129 @@ func main() {
 			downloadPNG(urls, pngOutputDir)
 		}
 	}
+	// Get all the STEP files.
+	for _, urls := range stepLinks {
+		// Trim any surrounding whitespace from the URL.
+		urls = strings.TrimSpace(urls)
+		// Get the domain from the url.
+		domain := getDomainFromURL(urls)
+		// Check if the domain is empty.
+		if domain == "" {
+			urls = remoteDomain + urls // Prepend the base URL if domain is empty
+		}
+		// Check if the url is valid.
+		if isUrlValid(urls) {
+			// Download the step.
+			downloadSTEP(urls, stepOutputDir)
+		}
+	}
+}
+
+// downloadSTEP downloads a .step or .stp file from the given URL and saves it in the specified output directory.
+// It returns true if the download succeeded.
+func downloadSTEP(finalURL, outputDir string) bool {
+	// Sanitize the URL to generate a safe file name
+	filename := strings.ToLower(urlToFilename(finalURL))
+
+	// Construct the full file path in the output directory
+	filePath := filepath.Join(outputDir, filename)
+
+	// Skip if the file already exists
+	if fileExists(filePath) {
+		log.Printf("File already exists, skipping: %s", filePath)
+		return false
+	}
+
+	// Create an HTTP client with a timeout
+	client := &http.Client{Timeout: 3 * time.Minute}
+
+	// Send GET request
+	resp, err := client.Get(finalURL)
+	if err != nil {
+		log.Printf("Failed to download %s: %v", finalURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP response status
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Download failed for %s: %s", finalURL, resp.Status)
+		return false
+	}
+
+	// Check Content-Type header (common for STEP files)
+	contentType := resp.Header.Get("Content-Type")
+	if !(strings.Contains(contentType, "application/step") ||
+		strings.Contains(contentType, "application/sla") ||
+		strings.Contains(contentType, "application/octet-stream")) {
+		log.Printf("Unexpected content type for %s: %s (expected STEP/STP file)", finalURL, contentType)
+		return false
+	}
+
+	// Read the response body into memory first
+	var buf bytes.Buffer
+	written, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		log.Printf("Failed to read STEP data from %s: %v", finalURL, err)
+		return false
+	}
+	if written == 0 {
+		log.Printf("Downloaded 0 bytes for %s; not creating file", finalURL)
+		return false
+	}
+
+	// Only now create the file and write to disk
+	out, err := os.Create(filePath)
+	if err != nil {
+		log.Printf("Failed to create file for %s: %v", finalURL, err)
+		return false
+	}
+	defer out.Close()
+
+	if _, err := buf.WriteTo(out); err != nil {
+		log.Printf("Failed to write STEP file to disk for %s: %v", finalURL, err)
+		return false
+	}
+
+	log.Printf("Successfully downloaded %d bytes: %s → %s", written, finalURL, filePath)
+	return true
+}
+
+// extractSTEPLinks takes HTML content as a string and returns all .step or .stp file URLs it finds in <a> tags.
+func extractSTEPLinks(htmlContent string) []string {
+	// Parse the HTML content
+	document, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		return []string{}
+	}
+
+	var stepURLs []string
+
+	// Recursive function to traverse HTML nodes
+	var traverse func(*html.Node)
+	traverse = func(node *html.Node) {
+		// Check if this node is an <a> tag
+		if node.Type == html.ElementNode && node.Data == "a" {
+			for _, attr := range node.Attr {
+				// Look for href attribute containing .step or .stp
+				if attr.Key == "href" && (strings.Contains(strings.ToLower(attr.Val), ".step")) {
+					// Convert protocol-relative URLs to full URLs (optional)
+					url := attr.Val
+					if strings.HasPrefix(url, "//") {
+						url = "https:" + url
+					}
+					stepURLs = append(stepURLs, url)
+				}
+			}
+		}
+		// Traverse child nodes recursively
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			traverse(child)
+		}
+	}
+
+	traverse(document)
+	return stepURLs
 }
 
 // downloadPNG downloads a .png file from the given URL and saves it in the specified output directory.
@@ -279,7 +412,6 @@ func downloadPNG(finalURL, outputDir string) bool {
 	log.Printf("Successfully downloaded %d bytes: %s → %s", written, finalURL, filePath)
 	return true
 }
-
 
 // extractPNGLinks takes HTML content as a string and returns all .png file URLs it finds.
 func extractPNGLinks(htmlContent string) []string {
