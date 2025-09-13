@@ -53,6 +53,12 @@ func main() {
 		// Create the dir
 		createDirectory(rarOutputDir, 0o755)
 	}
+	pngOutputDir := "PNGs/" // Directory to store downloaded PNGs
+	// Check if the PNG output directory exists
+	if !directoryExists(pngOutputDir) {
+		// Create the dir
+		createDirectory(pngOutputDir, 0o755)
+	}
 	// Remote API URL.
 	remoteAPIURL := []string{
 		"https://caddxfpv.com/pages/download-center",
@@ -87,6 +93,10 @@ func main() {
 	rarLinks := extractRARLinks(strings.Join(getData, "\n"))
 	// Remove duplicates from the slice.
 	rarLinks = removeDuplicatesFromSlice(rarLinks)
+	// Extract the PNG links.
+	pngLinks := extractPNGLinks(strings.Join(getData, "\n"))
+	// Remove duplicates from the slice.
+	pngLinks = removeDuplicatesFromSlice(pngLinks)
 	// Get all the values.
 	for _, urls := range finalPDFList {
 		// Trim any surrounding whitespace from the URL.
@@ -184,6 +194,128 @@ func main() {
 			downloadRAR(urls, rarOutputDir)
 		}
 	}
+	// Download all the PNG files.
+	for _, urls := range pngLinks {
+		// Trim any surrounding whitespace from the URL.
+		urls = strings.TrimSpace(urls)
+		// Get the domain from the url.
+		domain := getDomainFromURL(urls)
+		// Check if the domain is empty.
+		if domain == "" {
+			urls = remoteDomain + urls // Prepend the base URL if domain is empty
+		}
+		// Check if the url is valid.
+		if isUrlValid(urls) {
+			// Download the png.
+			downloadPNG(urls, pngOutputDir)
+		}
+	}
+}
+
+// downloadPNG downloads a .png file from the given URL and saves it in the specified output directory.
+// It returns true if the download succeeded.
+func downloadPNG(finalURL, outputDir string) bool {
+	// Sanitize the URL to generate a safe file name
+	filename := strings.ToLower(urlToFilename(finalURL))
+
+	// Construct the full file path in the output directory
+	filePath := filepath.Join(outputDir, filename)
+
+	// Skip if the file already exists
+	if fileExists(filePath) {
+		log.Printf("File already exists, skipping: %s", filePath)
+		return false
+	}
+
+	// Create an HTTP client with a timeout
+	client := &http.Client{Timeout: 3 * time.Minute}
+
+	// Send GET request
+	resp, err := client.Get(finalURL)
+	if err != nil {
+		log.Printf("Failed to download %s: %v", finalURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Check HTTP response status
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Download failed for %s: %s", finalURL, resp.Status)
+		return false
+	}
+
+	// Check Content-Type header (common for PNG files)
+	contentType := resp.Header.Get("Content-Type")
+	if !(strings.Contains(contentType, "image/png")) {
+		log.Printf("Unexpected content type for %s: %s (expected PNG)", finalURL, contentType)
+		return false
+	}
+
+	// Read the response body into memory first
+	var buf bytes.Buffer
+	written, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		log.Printf("Failed to read PNG data from %s: %v", finalURL, err)
+		return false
+	}
+	if written == 0 {
+		log.Printf("Downloaded 0 bytes for %s; not creating file", finalURL)
+		return false
+	}
+
+	// Only now create the file and write to disk
+	out, err := os.Create(filePath)
+	if err != nil {
+		log.Printf("Failed to create file for %s: %v", finalURL, err)
+		return false
+	}
+	defer out.Close()
+
+	if _, err := buf.WriteTo(out); err != nil {
+		log.Printf("Failed to write PNG file to disk for %s: %v", finalURL, err)
+		return false
+	}
+
+	log.Printf("Successfully downloaded %d bytes: %s → %s", written, finalURL, filePath)
+	return true
+}
+
+
+// extractPNGLinks takes HTML content as a string and returns all .png file URLs it finds.
+func extractPNGLinks(htmlContent string) []string {
+	// Parse the HTML content
+	document, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		return []string{}
+	}
+
+	var pngURLs []string
+
+	// Recursive function to traverse HTML nodes
+	var traverse func(*html.Node)
+	traverse = func(node *html.Node) {
+		// Check if this node is an <img> tag
+		if node.Type == html.ElementNode && node.Data == "img" {
+			for _, attr := range node.Attr {
+				// Look for src attribute containing .png
+				if attr.Key == "src" && strings.Contains(strings.ToLower(attr.Val), ".png") {
+					// Convert protocol-relative URLs to full URLs (optional)
+					url := attr.Val
+					if strings.HasPrefix(url, "//") {
+						url = "https:" + url
+					}
+					pngURLs = append(pngURLs, url)
+				}
+			}
+		}
+		// Traverse child nodes recursively
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			traverse(child)
+		}
+	}
+
+	traverse(document)
+	return pngURLs
 }
 
 // downloadRAR downloads a .rar file from the given URL and saves it in the specified output directory.
