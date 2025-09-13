@@ -1050,6 +1050,7 @@ func urlToFilename(rawURL string) string {
 		"_jpg",
 		"_rar",
 		"_png",
+		"_step",
 	}
 
 	for _, invalidPre := range invalidSubstrings { // Remove unwanted substrings
