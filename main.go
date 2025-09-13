@@ -1,18 +1,19 @@
 package main // Define the main package
 
 import (
-	"bytes"                 // Provides bytes support
+	"bytes" // Provides bytes support
+	"io"            // Provides basic interfaces to I/O primitives
+	"log"           // Provides logging functions
+	"net/http"      // Provides HTTP client and server implementations
+	"net/url"       // Provides URL parsing and encoding
+	"os"            // Provides functions to interact with the OS (files, etc.)
+	"path"          // Provides functions for manipulating slash-separated paths
+	"path/filepath" // Provides filepath manipulation functions
+	"regexp"        // Provides regex support functions.
+	"strings"       // Provides string manipulation functions
+	"time"          // Provides time-related functions
+
 	"golang.org/x/net/html" // Provides HTML parsing functions
-	"io"                    // Provides basic interfaces to I/O primitives
-	"log"                   // Provides logging functions
-	"net/http"              // Provides HTTP client and server implementations
-	"net/url"               // Provides URL parsing and encoding
-	"os"                    // Provides functions to interact with the OS (files, etc.)
-	"path"                  // Provides functions for manipulating slash-separated paths
-	"path/filepath"         // Provides filepath manipulation functions
-	"regexp"                // Provides regex support functions.
-	"strings"               // Provides string manipulation functions
-	"time"                  // Provides time-related functions
 )
 
 func main() {
@@ -737,7 +738,18 @@ func getDomainFromURL(rawURL string) string {
 
 // Only return the file name from a given url.
 func getFileNameOnly(content string) string {
-	return path.Base(content)
+	parsedURL, err := url.Parse(content)
+	if err != nil {
+		return "" // fallback if URL is invalid
+	}
+
+	// Get the last segment of the path (the file name)
+	fileNameWithQuery := path.Base(parsedURL.Path)
+
+	// Remove query parameters (anything after '?')
+	fileName := strings.SplitN(fileNameWithQuery, "?", 2)[0]
+
+	return fileName
 }
 
 // urlToFilename generates a safe, lowercase filename from a given URL string.
@@ -747,49 +759,44 @@ func urlToFilename(rawURL string) string {
 	// Convert the full URL to lowercase for consistency
 	lowercaseURL := strings.ToLower(rawURL)
 
-	// Get the file extension
-	ext := getFileExtension(lowercaseURL)
-
 	// Extract the filename portion from the URL (e.g., last path segment or query param)
 	baseFilename := getFileNameOnly(lowercaseURL)
-	log.Println("Base filename extracted:", baseFilename)
 
-	// Get the file name before ? if any.
-	if strings.Contains(baseFilename, "?") {
-		baseFilename = strings.Split(baseFilename, "?")[0]
-	}
+	// Get the file extension
+	ext := getFileExtension(baseFilename)
 
 	// Replace all non-alphanumeric characters (a-z, 0-9) with underscores
 	nonAlphanumericRegex := regexp.MustCompile(`[^a-z0-9]+`)
-	safeFilename := nonAlphanumericRegex.ReplaceAllString(baseFilename, "_")
+	baseFilename = nonAlphanumericRegex.ReplaceAllString(baseFilename, "_")
 
 	// Replace multiple consecutive underscores with a single underscore
 	collapseUnderscoresRegex := regexp.MustCompile(`_+`)
-	safeFilename = collapseUnderscoresRegex.ReplaceAllString(safeFilename, "_")
+	baseFilename = collapseUnderscoresRegex.ReplaceAllString(baseFilename, "_")
 
 	// Remove leading underscore if present
-	if trimmed, found := strings.CutPrefix(safeFilename, "_"); found {
-		safeFilename = trimmed
+	if trimmed, found := strings.CutPrefix(baseFilename, "_"); found {
+		baseFilename = trimmed
 	}
 
 	var invalidSubstrings = []string{
 		"_pdf",
 		"_zip",
-		"_jpg",
 		"_stp",
 		"_stl",
+		"_jpg",
 		"_rar",
+		"_png",
 	}
 
 	for _, invalidPre := range invalidSubstrings { // Remove unwanted substrings
-		safeFilename = removeSubstring(safeFilename, invalidPre)
+		baseFilename = removeSubstring(baseFilename, invalidPre)
 	}
 
 	// Append the file extension if it is not already present
-	safeFilename = safeFilename + ext
+	baseFilename = baseFilename + ext
 
 	// Return the cleaned and safe filename
-	return safeFilename
+	return baseFilename
 }
 
 // Removes all instances of a specific substring from input string
